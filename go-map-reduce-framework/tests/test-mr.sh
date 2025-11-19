@@ -58,16 +58,16 @@ cd mr-tmp || exit 1
 rm -f mr-*
 
 # make sure software is freshly built.
-(cd ../../mrapps && go clean)
+(cd ../mrapps && go clean)
 (cd .. && go clean)
-(cd ../../mrapps && go build $RACE -buildmode=plugin wc.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin indexer.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin mtiming.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin rtiming.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin jobcount.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin early_exit.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin crash.go) || exit 1
-(cd ../../mrapps && go build $RACE -buildmode=plugin nocrash.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin wc.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin indexer.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin mtiming.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin rtiming.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin jobcount.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin early_exit.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin crash.go) || exit 1
+(cd ../mrapps && go build $RACE -buildmode=plugin nocrash.go) || exit 1
 (cd .. && go build $RACE mrcoordinator.go) || exit 1
 (cd .. && go build $RACE mrworker.go) || exit 1
 (cd .. && go build $RACE mrsequential.go) || exit 1
@@ -78,7 +78,7 @@ failed_any=0
 # first word-count
 
 # generate the correct output
-../mrsequential ../../mrapps/wc.so ../pg*txt || exit 1
+../mrsequential ../mrapps/wc.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-wc.txt
 rm -f mr-out*
 
@@ -91,9 +91,9 @@ pid=$!
 sleep 1
 
 # start multiple workers.
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/wc.so) &
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/wc.so) &
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/wc.so) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/wc.so) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/wc.so) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/wc.so) &
 
 # wait for the coordinator to exit.
 wait $pid
@@ -118,7 +118,7 @@ wait
 rm -f mr-*
 
 # generate the correct output
-../mrsequential ../../mrapps/indexer.so ../pg*txt || exit 1
+../mrsequential ../mrapps/indexer.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-indexer.txt
 rm -f mr-out*
 
@@ -128,8 +128,8 @@ maybe_quiet $TIMEOUT ../mrcoordinator ../pg*txt &
 sleep 1
 
 # start multiple workers
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/indexer.so &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/indexer.so
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/indexer.so &
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/indexer.so
 
 sort mr-out* | grep . > mr-indexer-all
 if cmp mr-indexer-all mr-correct-indexer.txt
@@ -151,8 +151,8 @@ rm -f mr-*
 maybe_quiet $TIMEOUT ../mrcoordinator ../pg*txt &
 sleep 1
 
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/mtiming.so &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/mtiming.so
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/mtiming.so &
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/mtiming.so
 
 NT=`cat mr-out* | grep '^times-' | wc -l | sed 's/ //g'`
 if [ "$NT" != "2" ]
@@ -182,8 +182,8 @@ rm -f mr-*
 maybe_quiet $TIMEOUT ../mrcoordinator ../pg*txt &
 sleep 1
 
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/rtiming.so  &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/rtiming.so
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/rtiming.so  &
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/rtiming.so
 
 NT=`cat mr-out* | grep '^[a-z] 2' | wc -l | sed 's/ //g'`
 if [ "$NT" -lt "2" ]
@@ -205,10 +205,10 @@ rm -f mr-*
 maybe_quiet $TIMEOUT ../mrcoordinator ../pg*txt  &
 sleep 1
 
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/jobcount.so &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/jobcount.so
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/jobcount.so &
-maybe_quiet $TIMEOUT ../mrworker ../../mrapps/jobcount.so
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/jobcount.so &
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/jobcount.so
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/jobcount.so &
+maybe_quiet $TIMEOUT ../mrworker ../mrapps/jobcount.so
 
 NT=`cat mr-out* | awk '{print $2}'`
 if [ "$NT" -eq "8" ]
@@ -238,9 +238,9 @@ rm -f $DF
 sleep 1
 
 # start multiple workers.
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/early_exit.so; touch $DF) &
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/early_exit.so; touch $DF) &
-(maybe_quiet $TIMEOUT ../mrworker ../../mrapps/early_exit.so; touch $DF) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/early_exit.so; touch $DF) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/early_exit.so; touch $DF) &
+(maybe_quiet $TIMEOUT ../mrworker ../mrapps/early_exit.so; touch $DF) &
 
 # wait for any of the coord or workers to exit.
 # `jobs` ensures that any completed old processes from other tests
@@ -284,7 +284,7 @@ rm -f mr-*
 echo '***' Starting crash test.
 
 # generate the correct output
-../mrsequential ../../mrapps/nocrash.so ../pg*txt || exit 1
+../mrsequential ../mrapps/nocrash.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-crash.txt
 rm -f mr-out*
 
@@ -293,26 +293,26 @@ rm -f mr-done
 sleep 1
 
 # start multiple workers
-maybe_quiet $TIMEOUT2 ../mrworker ../../mrapps/crash.so &
+maybe_quiet $TIMEOUT2 ../mrworker ../mrapps/crash.so &
 
 # mimic rpc.go's coordinatorSock()
 SOCKNAME=/var/tmp/5840-mr-`id -u`
 
 ( while [ -e $SOCKNAME -a ! -f mr-done ]
   do
-    maybe_quiet $TIMEOUT2 ../mrworker ../../mrapps/crash.so
+    maybe_quiet $TIMEOUT2 ../mrworker ../mrapps/crash.so
     sleep 1
   done ) &
 
 ( while [ -e $SOCKNAME -a ! -f mr-done ]
   do
-    maybe_quiet $TIMEOUT2 ../mrworker ../../mrapps/crash.so
+    maybe_quiet $TIMEOUT2 ../mrworker ../mrapps/crash.so
     sleep 1
   done ) &
 
 while [ -e $SOCKNAME -a ! -f mr-done ]
 do
-  maybe_quiet $TIMEOUT2 ../mrworker ../../mrapps/crash.so
+  maybe_quiet $TIMEOUT2 ../mrworker ../mrapps/crash.so
   sleep 1
 done
 
