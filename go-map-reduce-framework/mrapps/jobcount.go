@@ -9,15 +9,15 @@ package main
 //
 
 import (
+	"fmt"
 	"go-map-reduce-framework/mr"
+	"io/ioutil"
 	"math/rand"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 )
-import "strings"
-import "strconv"
-import "time"
-import "fmt"
-import "os"
-import "io/ioutil"
 
 var count int
 
