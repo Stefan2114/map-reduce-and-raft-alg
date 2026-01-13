@@ -8,15 +8,15 @@ package main
 //
 
 import (
+	"fmt"
 	"go-map-reduce-framework/mr"
+	"io/ioutil"
+	"os"
+	"sort"
 	"strings"
+	"syscall"
+	"time"
 )
-import "fmt"
-import "os"
-import "syscall"
-import "time"
-import "sort"
-import "io/ioutil"
 
 func nparallel(phase string) int {
 	// create a file so that other workers will see that

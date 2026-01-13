@@ -9,11 +9,10 @@ package main
 import (
 	"fmt"
 	"go-map-reduce-framework/mr"
+	"sort"
+	"strings"
+	"unicode"
 )
-
-import "strings"
-import "unicode"
-import "sort"
 
 // The mapping function is called once for each piece of the input.
 // In this framework, the key is the name of the file that is being processed,

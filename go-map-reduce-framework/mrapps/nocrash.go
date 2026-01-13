@@ -9,12 +9,12 @@ package main
 import (
 	crand "crypto/rand"
 	"go-map-reduce-framework/mr"
+	"math/big"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
 )
-import "math/big"
-import "strings"
-import "os"
-import "sort"
-import "strconv"
 
 func maybeCrash() {
 	max := big.NewInt(1000)
