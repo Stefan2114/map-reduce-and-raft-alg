@@ -3,9 +3,12 @@ package mr
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
-type HeartbeatRequest struct{}
+type HeartbeatRequest struct {
+	WorkerID int
+}
 
 type HeartBeatResponse struct {
 	JobType  JobType
@@ -23,6 +26,23 @@ type ReportRequest struct {
 }
 
 type ReportResponse struct{}
+
+type GossipRequest struct {
+	WorkerID    int
+	HealthTable map[int]*HealthEntry
+	Timestamp   time.Time
+}
+
+type GossipResponse struct {
+	HealthTable map[int]*HealthEntry
+}
+
+type FailureReportRequest struct {
+	WorkerID int
+	Reason   string
+}
+
+type FailureReportResponse struct{}
 
 type JobType int
 
