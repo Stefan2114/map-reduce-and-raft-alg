@@ -97,27 +97,146 @@ The following diagram shows the primary-backup coordination mechanism:
 
 ### 2.5 Tier 4: Decentralized Gossip-based Health Monitoring
 
-This is the main contribution. Instead of workers sending heartbeats to the coordinator, workers monitor each other's health using a gossip protocol.
+This is the main contribution. Instead of workers sending heartbeats to the coordinator, workers monitor each other's health using a gossip protocol. This section provides a detailed explanation of how the protocol works.
 
-**Protocol Design:**
-- Workers are organized in a ring topology
-- Each worker maintains a health table tracking other workers' status
-- Every 100ms, workers exchange health tables with k=3 neighbors
-- If a worker doesn't respond, it's marked as "Suspect"
-- When 3 workers agree a worker is failed, it's reported to the coordinator
+#### 2.5.1 Protocol Overview
 
-**Health Table:** Each worker maintains a table with entries for all other workers, storing:
-- Status: Alive, Suspect, or Dead
-- Last seen timestamp
-- Suspicion count
+The gossip protocol operates by having workers periodically exchange health information with a small set of neighbors. Each worker maintains a local view of the entire cluster's health status, and through repeated exchanges, this information propagates throughout the cluster. When multiple workers independently detect a failure, consensus is reached and the coordinator is notified.
 
-**Memory Overhead:** For N workers, each worker stores O(N) health information. With 32 bytes per entry, 50 workers requires ~1.6 KB per worker, which is still small but grows linearly with cluster size.
+#### 2.5.2 Neighbor Selection and Topology
 
-**Trade-offs:**
-- Reduces coordinator load (workers don't all heartbeat to coordinator)
-- Increases worker memory usage (health tables)
-- Adds CPU overhead for processing gossip messages
-- May increase task execution time slightly
+**Initialization:** When a worker joins the cluster, it receives a list of all worker IDs. The worker then selects k=3 neighbors using a random selection algorithm. The selection process:
+1. Creates a list of all workers except itself
+2. Randomly selects k workers (or all available if fewer than k workers exist)
+3. Stores these neighbors for subsequent gossip rounds
+
+**Neighbor Stability:** Neighbors are selected once at initialization and remain fixed during the worker's lifetime. This simplifies implementation but means a worker won't adapt if its neighbors fail.
+
+#### 2.5.3 Health Table Structure
+
+Each worker maintains a health table that maps worker IDs to health entries. A health entry contains:
+
+- **Status:** One of three states:
+  - `Alive`: Worker is healthy and responding
+  - `Suspect`: Worker has failed to respond but consensus not yet reached
+  - `Dead`: Worker is confirmed failed (consensus reached)
+
+
+#### 2.5.4 Gossip Message Exchange
+
+**Gossip Interval:** Every T_gossip = 100ms, each worker initiates a gossip round:
+
+1. **Message Preparation:** The worker creates a gossip message containing:
+   - Its own worker ID
+   - A copy of its entire health table
+   - Current timestamp
+
+2. **Parallel Sending:** The worker sends this message to all k neighbors concurrently. This parallelization reduces latency.
+
+3. **Response Handling:** For each neighbor:
+   - If the neighbor responds successfully: The worker merges the neighbor's health table into its own (see merging algorithm below) and marks the neighbor as `Alive` with updated `LastSeen` timestamp.
+   - If the neighbor doesn't respond: The worker marks the neighbor as `Suspect` and increments its suspicion count.
+
+**Example Exchange:**
+```
+Worker W1 sends gossip to neighbors [W2, W3, W4]:
+  - W2 responds: W1 merges W2's health table, marks W2 as Alive
+  - W3 doesn't respond: W1 marks W3 as Suspect, suspicion_count = 1
+  - W4 responds: W1 merges W4's health table, marks W4 as Alive
+```
+
+#### 2.5.5 Health Table Merging Algorithm
+
+When a worker receives a gossip message from a neighbor, it merges the neighbor's health table into its own. The merge algorithm uses a conflict resolution strategy:
+
+**For each worker ID in the received health table:**
+
+1. **New Entry:** If the worker doesn't have an entry for this ID, it creates one using the received information.
+
+2. **Timestamp-Based Resolution:** If both workers have entries:
+   - If the received entry's `LastUpdate` timestamp is newer, the local entry is replaced entirely.
+   - This ensures that more recent information takes precedence.
+
+3. **Status Escalation:** If the received entry has status `Suspect` and the local entry has status `Alive`, the local status is upgraded to `Suspect`. Status can only escalate (Alive → Suspect → Dead), never de-escalate.
+
+**Merge Example:**
+```
+Worker W1's local table: {W5: Alive, suspicion=0}
+Worker W2's received table: {W5: Suspect, suspicion=2}
+
+After merge: W1 updates W5 to Suspect, suspicion=2
+```
+
+#### 2.5.6 Suspicion Mechanism
+
+**Direct Suspicion:** When a worker W_i attempts to send a gossip message to neighbor W_j and W_j doesn't respond:
+- If W_j was previously `Alive`, it's marked as `Suspect` with `SuspicionCount = 1`
+- If W_j was already `Suspect`, its `SuspicionCount` is incremented
+
+**Suspicion Propagation:** Through gossip exchanges, suspicion counts propagate across the cluster. If worker W1 suspects W5 (suspicion=1), and worker W2 also suspects W5 (suspicion=2), when W1 and W2 exchange gossip, W1 will update its suspicion count to 2.
+
+**Suspicion Timeout:** Every T_suspicion = 300ms, each worker checks its health table for workers with high suspicion counts. This periodic check ensures that consensus is evaluated even if gossip exchanges are delayed.
+
+#### 2.5.7 Consensus-Based Failure Detection
+
+**Consensus Threshold:** A worker is declared `Dead` when its `SuspicionCount` reaches the consensus threshold C = 3. This means at least 3 different workers have independently suspected the failure.
+
+**Consensus Formation Process:**
+1. Worker W1 marks W5 as `Suspect` (suspicion=1) after failed communication
+2. Worker W1 sends gossip to W2, W3, W4
+3. Worker W2 also suspects W5 (suspicion=1) and shares this with W1
+4. After merge, W1's view of W5 has suspicion=2 (aggregated from W1 and W2)
+5. Worker W3 also suspects W5 and shares with W1
+6. After merge, W1's view of W5 has suspicion=3
+7. W1 marks W5 as `Dead` and reports to coordinator
+
+**Coordinator Notification:** When a worker reaches consensus (suspicion_count ≥ C), it:
+1. Updates the worker's status to `Dead` in its health table
+2. Sends a failure report to the coordinator via RPC
+3. The coordinator then reschedules any tasks assigned to the failed worker
+
+**False Positive Mitigation:** The consensus threshold (C=3) helps reduce false positives from transient network issues. A single missed response won't trigger a failure report - multiple independent suspicions are required.
+
+#### 2.5.8 Example Scenario: Worker Failure Detection
+
+Consider a cluster with 5 workers (W1-W5) where W3 fails:
+
+**Time t=0ms:** W3 fails (process crashes)
+
+**Time t=100ms:** First gossip round:
+- W1 tries to contact W3 → fails → marks W3 as Suspect (suspicion=1)
+- W2 tries to contact W3 → fails → marks W3 as Suspect (suspicion=1)
+- W4 tries to contact W3 → fails → marks W3 as Suspect (suspicion=1)
+- W5 tries to contact W3 → fails → marks W3 as Suspect (suspicion=1)
+
+**Time t=200ms:** Second gossip round:
+- W1 exchanges with W2: Both have W3 as Suspect, suspicion=1
+- After merge: W1 and W2 both have W3 with suspicion=2 (aggregated)
+- Similar exchanges happen between other workers
+
+**Time t=300ms:** Suspicion check:
+- W1 checks: W3 has suspicion=2 (not yet at threshold C=3)
+- W2 checks: W3 has suspicion=2
+- No failure report yet
+
+**Time t=300ms+:** Additional gossip exchanges:
+- W1 receives gossip from W4 (who also suspects W3)
+- W1's suspicion count for W3 reaches 3
+- W1 marks W3 as Dead and reports to coordinator
+
+**Total Detection Time:** Approximately 300-400ms, compared to 5-10 seconds in centralized timeout-based detection.
+
+#### 2.5.9 Trade-offs and Limitations
+
+**Advantages:**
+- **Reduced Coordinator Load:** Coordinator doesn't receive N heartbeat messages per interval. Instead, it only receives failure reports when consensus is reached (much less frequent).
+- **Scalability:** Communication overhead is O(k×N) per interval (distributed) vs O(N) at coordinator (centralized bottleneck).
+
+**Disadvantages:**
+- **Memory Overhead:** Each worker stores O(N) health information. For 50 workers, this is ~1.6 KB per worker, which is acceptable but grows linearly.
+- **CPU Overhead:** Processing gossip messages and merging health tables consumes CPU cycles. This adds 0.4-6.2% overhead to task execution time depending on cluster size.
+- **Slower Makespan:** The gossip processing overhead results in slower job completion times compared to Tier 3 (1-2.5s slower in our experiments).
+- **Complexity:** The protocol is more complex to implement and debug than centralized heartbeating.
 
 ## 3. Experimental Validation
 
