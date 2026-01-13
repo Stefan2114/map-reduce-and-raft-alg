@@ -1,0 +1,30 @@
+# Ignore Go executables (binary files created by 'go build')
+*.exe
+*.bin
+
+# Dependency management related files
+# The 'vendor' directory is often committed, but if you choose not to, uncomment the line below:
+# /vendor/
+
+# Go module cache and temporary files (often found in $GOPATH/pkg/mod)
+/pkg/
+
+# Common files used for environment variables or configurations
+.env
+.DS_Store
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+
+# IDE/Editor specific temporary files (add more if needed)
+# Visual Studio Code
+.vscode/
+
+# JetBrains IDEs (GoLand, IntelliJ)
+.idea/
+
+/mr-temp/
+**.so
