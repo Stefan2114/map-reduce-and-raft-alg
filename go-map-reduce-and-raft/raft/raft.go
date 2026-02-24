@@ -1,15 +1,17 @@
 package raft
 
 import (
+	"bytes"
 	"fmt"
-	"go-map-reduce-and-raft/labrpc"
-	"go-map-reduce-and-raft/raftapi"
-	"go-map-reduce-and-raft/tester"
-	// "bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go-map-reduce-and-raft/labgob"
+	"go-map-reduce-and-raft/labrpc"
+	"go-map-reduce-and-raft/raftapi"
+	"go-map-reduce-and-raft/tester"
 )
 
 type NodeState int
@@ -121,6 +123,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.logs = append(rf.logs, entry)
+	rf.persist()
 	DPrintf("{Node %v} receives a new command(index: %v, term: %v) to replicate in term %v", rf.me, newIndex, newTerm, rf.currentTerm)
 	rf.BroadcastHeartbeat()
 	return newIndex, newTerm, true
@@ -129,6 +132,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 func (rf *Raft) persist() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.logs) != nil {
+		panic("failed to encode persistent state")
+	}
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -136,6 +148,20 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []Entry
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		panic("failed to decode persistent state")
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.logs = logs
 }
 
 // how many bytes in Raft's persisted log?
@@ -206,6 +232,7 @@ func (rf *Raft) becomeCandidate() {
 
 	rf.state = StateCandidate
 	rf.currentTerm += 1
+	rf.persist()
 	rf.StartElection()
 	rf.resetElectionTimer()
 }
@@ -252,7 +279,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
 
 	reply.Term, reply.VoteGranted = rf.currentTerm, false
@@ -260,6 +286,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		return
 	}
+	defer rf.persist()
 
 	if args.Term > rf.currentTerm {
 		rf.state = StateFollower
@@ -297,7 +324,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v} before processing AppendEntriesArgs %v and reply AppendEntriesReply %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, args, reply)
 
 	reply.Term, reply.Success = rf.currentTerm, false
@@ -305,6 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		return
 	}
+	defer rf.persist()
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = args.Term, -1
@@ -376,6 +403,44 @@ func (rf *Raft) advanceCommitIndex(leaderCommit int) {
 			rf.commitIndex = lastIndex
 		}
 		rf.applyCond.Broadcast()
+	}
+}
+
+func (rf *Raft) StartElection() {
+
+	args := rf.genRequestVoteArgs()
+	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, args)
+	rf.votedFor = rf.me
+	rf.persist()
+	grantedVotes := 1
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int) {
+			reply := new(RequestVoteReply)
+			if rf.sendRequestVote(peer, args, reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, reply, peer, args, rf.currentTerm)
+				if !rf.isStillValidCandidate(args.Term) {
+					return
+				}
+				if rf.handleHigherTerm(reply.Term) {
+					DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
+					return
+				}
+
+				if reply.VoteGranted {
+					grantedVotes++
+					if grantedVotes > len(rf.peers)/2 {
+						DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
+						rf.becomeLeader()
+					}
+				}
+
+			}
+		}(peer)
 	}
 }
 
@@ -484,44 +549,6 @@ func (rf *Raft) countNodesWithLogAt(index int) int {
 	return count
 }
 
-func (rf *Raft) StartElection() {
-
-	args := rf.genRequestVoteArgs()
-	DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me, args)
-	rf.votedFor = rf.me
-	grantedVotes := 1
-	rf.persist()
-	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		go func(peer int) {
-			reply := new(RequestVoteReply)
-			if rf.sendRequestVote(peer, args, reply) {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, reply, peer, args, rf.currentTerm)
-				if !rf.isStillValidCandidate(args.Term) {
-					return
-				}
-				if rf.handleHigherTerm(reply.Term) {
-					DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
-					return
-				}
-
-				if reply.VoteGranted {
-					grantedVotes++
-					if grantedVotes > len(rf.peers)/2 {
-						DPrintf("{Node %v} receives majority votes in term %v", rf.me, rf.currentTerm)
-						rf.becomeLeader()
-					}
-				}
-
-			}
-		}(peer)
-	}
-}
-
 func (rf *Raft) genRequestVoteArgs() *RequestVoteArgs {
 	lastLog := rf.getLastLog()
 	return &RequestVoteArgs{
@@ -567,7 +594,7 @@ func (rf *Raft) killed() bool {
 }
 
 func RandomizedElectionTimeout() time.Duration {
-	ms := 600 + rand.Int63()%400
+	ms := 400 + rand.Int63()%400
 	return time.Duration(ms) * time.Millisecond
 }
 
