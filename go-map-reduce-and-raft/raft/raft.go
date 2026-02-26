@@ -223,9 +223,9 @@ func (rf *Raft) applier() {
 			}
 		}
 
-		// Check if we need to apply a snapshot first
 		// If lastApplied is less than lastIncludedIndex, the state machine is behind the snapshot
 		if rf.lastApplied < rf.lastIncludedIndex {
+
 			msg := raftapi.ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      rf.persister.ReadSnapshot(),
@@ -244,7 +244,6 @@ func (rf *Raft) applier() {
 		pStart := rf.getPhysicalIndex(start)
 		pLimit := rf.getPhysicalIndex(limit)
 
-		// Slice and copy to avoid data races once we unlock [cite: 428]
 		entries := make([]Entry, pLimit-pStart+1)
 		copy(entries, rf.logs[pStart:pLimit+1])
 
@@ -283,14 +282,12 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeLeader() {
-	if rf.state != StateCandidate {
-		return
-	}
+
 	rf.state = StateLeader
 	lastIndex := rf.getLastLog().Index
 	for i := range rf.peers {
 		rf.nextIndex[i] = lastIndex + 1
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = rf.lastIncludedIndex
 	}
 	rf.BroadcastHeartbeat()
 	rf.resetHeartbeatTimer()
@@ -338,8 +335,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm, rf.votedFor = args.Term, -1
 	}
 
-	upToDate := rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex)
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && upToDate {
+	canVote := rf.votedFor == -1 || rf.votedFor == args.CandidateId
+	logUpToDate := rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex)
+	if canVote && logUpToDate {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.resetElectionTimer()
@@ -428,10 +426,10 @@ func (rf *Raft) handleConsistencyConflict(args *AppendEntriesArgs, reply *Append
 
 func (rf *Raft) appendNewEntries(entries []Entry) {
 	for i, entry := range entries {
-
 		if entry.Index <= rf.commitIndex {
 			continue
 		}
+
 		if entry.Index < rf.getLen() {
 			// Rule 3: If an existing entry conflicts with a new one (same index
 			// but different terms), delete the existing entry and all that follow it
@@ -452,7 +450,6 @@ func (rf *Raft) appendNewEntries(entries []Entry) {
 func (rf *Raft) advanceCommitIndex(leaderCommit int) {
 	if leaderCommit > rf.commitIndex {
 		lastIndex := rf.getLen() - 1
-		// Rule 5: set commitIndex = min(leaderCommit, index of last new entry)
 		if leaderCommit < lastIndex {
 			rf.commitIndex = leaderCommit
 		} else {
@@ -519,29 +516,12 @@ func (rf *Raft) replicateToPeer(peer int) {
 
 	if rf.nextIndex[peer] <= rf.lastIncludedIndex {
 
-		args := &InstallSnapshotArgs{
-			Term:              rf.currentTerm,
-			LeaderId:          rf.me,
-			LastIncludedIndex: rf.lastIncludedIndex,
-			LastIncludedTerm:  rf.lastIncludedTerm,
-			Data:              rf.persister.ReadSnapshot(),
-		}
+		args := rf.genInstallSnapshotArgs()
 		rf.mu.Unlock()
 
 		reply := &InstallSnapshotReply{}
-		if ok := rf.peers[peer].Call("Raft.InstallSnapshot", args, reply); ok {
-			rf.mu.Lock()
-			if isHigher := rf.handleHigherTerm(reply.Term); isHigher {
-				rf.mu.Unlock()
-				return
-			}
-			if rf.state == StateLeader && rf.currentTerm == args.Term {
-				if rf.matchIndex[peer] < args.LastIncludedIndex {
-					rf.matchIndex[peer] = args.LastIncludedIndex
-					rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-				}
-			}
-			rf.mu.Unlock()
+		if ok := rf.sendInstallSnapshot(peer, args, reply); ok {
+			rf.handleInstallSnapshotReply(peer, args, reply)
 		}
 		return
 	}
@@ -553,6 +533,16 @@ func (rf *Raft) replicateToPeer(peer int) {
 	reply := new(AppendEntriesReply)
 	if ok := rf.sendAppendEntries(peer, args, reply); ok {
 		rf.handleAppendEntriesReply(peer, args, reply)
+	}
+}
+
+func (rf *Raft) genInstallSnapshotArgs() *InstallSnapshotArgs {
+	return &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+		Data:              rf.persister.ReadSnapshot(),
 	}
 }
 
@@ -572,6 +562,20 @@ func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs {
 	}
 }
 
+func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if isHigher := rf.handleHigherTerm(reply.Term); isHigher {
+		return
+	}
+	if rf.state == StateLeader && rf.currentTerm == args.Term {
+		if rf.matchIndex[peer] < args.LastIncludedIndex {
+			rf.matchIndex[peer] = args.LastIncludedIndex
+			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		}
+	}
+}
+
 func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	rf.mu.Lock()
@@ -583,22 +587,10 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 	if rf.state != StateLeader || rf.currentTerm != args.Term {
 		return
 	}
-	if reply.Success {
-		// Update indices based on the entries WE SENT, not current log length
-		newMatch := args.PrevLogIndex + len(args.Entries)
-		if newMatch > rf.matchIndex[peer] {
-			rf.matchIndex[peer] = newMatch
-			rf.nextIndex[peer] = newMatch + 1
-		}
-		rf.updateCommitIndex()
-	} else {
-		//// 3. Handle Failure (Log Inconsistency)
+	if !reply.Success {
 		if reply.ConflictTerm == -1 {
-			// Follower log is too short
 			rf.nextIndex[peer] = reply.ConflictIndex
 		} else {
-			// Follower has a term mismatch
-			// Optimization: search leader's log for the conflict term
 			found := false
 			for i := args.PrevLogIndex; i >= 1; i-- {
 				if rf.getLog(i).Term == reply.ConflictTerm {
@@ -612,7 +604,16 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 			}
 		}
 		go rf.replicateToPeer(peer)
+		return
 	}
+
+	// Update indices based on the entries WE SENT, not current log length
+	newMatch := args.PrevLogIndex + len(args.Entries)
+	if newMatch > rf.matchIndex[peer] {
+		rf.matchIndex[peer] = newMatch
+		rf.nextIndex[peer] = newMatch + 1
+	}
+	rf.updateCommitIndex()
 }
 
 func (rf *Raft) updateCommitIndex() {
@@ -692,7 +693,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		// We have the entry. Slice it so that the entry at LastIncludedIndex is at physical index 0
 		rf.logs = append([]Entry{}, rf.logs[rf.getPhysicalIndex(args.LastIncludedIndex):]...)
 	} else {
-		// We don't have it or there's a term mismatch. Reset the log.
 		rf.logs = []Entry{{Index: args.LastIncludedIndex, Term: args.LastIncludedTerm}}
 	}
 
@@ -705,6 +705,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.persister.Save(rf.encodeState(), args.Data)
 	rf.applyCond.Broadcast()
+}
+
+func (rf *Raft) sendInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[peer].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 func (rf *Raft) getLastLog() Entry {
