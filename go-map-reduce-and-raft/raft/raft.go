@@ -33,7 +33,7 @@ func (e Entry) String() string {
 }
 
 type Raft struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	peers     []*labrpc.ClientEnd
 	persister *tester.Persister
 	me        int
@@ -87,8 +87,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	return rf.currentTerm, rf.state == StateLeader
 }
 
@@ -174,8 +174,8 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) PersistBytes() int {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	return rf.persister.RaftStateSize()
 }
 
@@ -197,7 +197,11 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
-			rf.becomeCandidate()
+			if rf.state == StateLeader {
+				rf.resetElectionTimer()
+			} else {
+				rf.becomeCandidate()
+			}
 			rf.mu.Unlock()
 
 		case <-rf.heartBeatTimer.C:
@@ -321,7 +325,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v",
+		rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), args, reply)
 
 	reply.Term, reply.VoteGranted = rf.currentTerm, false
 
@@ -426,21 +431,17 @@ func (rf *Raft) handleConsistencyConflict(args *AppendEntriesArgs, reply *Append
 
 func (rf *Raft) appendNewEntries(entries []Entry) {
 	for i, entry := range entries {
-		if entry.Index <= rf.commitIndex {
-			continue
-		}
 
 		if entry.Index < rf.getLen() {
 			// Rule 3: If an existing entry conflicts with a new one (same index
 			// but different terms), delete the existing entry and all that follow it
 			pIdx := rf.getPhysicalIndex(entry.Index)
 			if rf.logs[pIdx].Term != entry.Term {
-				rf.logs = rf.logs[:pIdx] // Truncate at physical index
+				rf.logs = rf.logs[:pIdx]
 				rf.logs = append(rf.logs, entries[i:]...)
 				break
 			}
 		} else {
-			// Entry is beyond current log length, just append all remaining entries
 			rf.logs = append(rf.logs, entries[i:]...)
 			break
 		}
@@ -475,12 +476,14 @@ func (rf *Raft) StartElection() {
 			if ok := rf.sendRequestVote(peer, args, reply); ok {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, reply, peer, args, rf.currentTerm)
+				DPrintf("{Node %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v",
+					rf.me, reply, peer, args, rf.currentTerm)
 				if !rf.isStillValidCandidate(args.Term) {
 					return
 				}
 				if isHigher := rf.handleHigherTerm(reply.Term); isHigher {
-					DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
+					DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v",
+						rf.me, peer, reply.Term, rf.currentTerm)
 					return
 				}
 
@@ -508,16 +511,16 @@ func (rf *Raft) BroadcastHeartbeat() {
 
 func (rf *Raft) replicateToPeer(peer int) {
 
-	rf.mu.Lock()
+	rf.mu.RLock()
 	if rf.state != StateLeader {
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 		return
 	}
 
 	if rf.nextIndex[peer] <= rf.lastIncludedIndex {
 
 		args := rf.genInstallSnapshotArgs()
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 
 		reply := &InstallSnapshotReply{}
 		if ok := rf.sendInstallSnapshot(peer, args, reply); ok {
@@ -528,7 +531,7 @@ func (rf *Raft) replicateToPeer(peer int) {
 
 	prevLogIndex := rf.nextIndex[peer] - 1
 	args := rf.genAppendEntriesArgs(prevLogIndex)
-	rf.mu.Unlock()
+	rf.mu.RUnlock()
 
 	reply := new(AppendEntriesReply)
 	if ok := rf.sendAppendEntries(peer, args, reply); ok {
@@ -587,12 +590,16 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 	if rf.state != StateLeader || rf.currentTerm != args.Term {
 		return
 	}
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		go rf.replicateToPeer(peer)
+		return
+	}
 	if !reply.Success {
 		if reply.ConflictTerm == -1 {
 			rf.nextIndex[peer] = reply.ConflictIndex
 		} else {
 			found := false
-			for i := args.PrevLogIndex; i >= 1; i-- {
+			for i := args.PrevLogIndex; i > rf.lastIncludedIndex; i-- {
 				if rf.getLog(i).Term == reply.ConflictTerm {
 					rf.nextIndex[peer] = i + 1
 					found = true
@@ -603,6 +610,8 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 				rf.nextIndex[peer] = reply.ConflictIndex
 			}
 		}
+		DPrintf("{Node %v} sets nextIndex[%v]=%v, leader lastIncludedIndex=%v",
+			rf.me, peer, rf.nextIndex[peer], rf.lastIncludedIndex)
 		go rf.replicateToPeer(peer)
 		return
 	}
@@ -753,7 +762,7 @@ func (rf *Raft) killed() bool {
 }
 
 func RandomizedElectionTimeout() time.Duration {
-	ms := 400 + rand.Int63()%400
+	ms := 600 + rand.Int63()%400
 	return time.Duration(ms) * time.Millisecond
 }
 
