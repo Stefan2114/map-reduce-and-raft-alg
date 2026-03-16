@@ -238,7 +238,15 @@ func (rf *Raft) applier() {
 
 		// If lastApplied is less than lastIncludedIndex, the state machine is behind the snapshot
 		if rf.lastApplied < rf.lastIncludedIndex {
-			rf.applySnapshot()
+			msg := raftapi.ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.persister.ReadSnapshot(),
+				SnapshotTerm:  rf.lastIncludedTerm,
+				SnapshotIndex: rf.lastIncludedIndex,
+			}
+			rf.lastApplied = rf.lastIncludedIndex
+			rf.mu.Unlock()
+			rf.applyCh <- msg
 			continue
 		}
 
@@ -266,18 +274,6 @@ func (rf *Raft) applier() {
 		}
 		rf.mu.Unlock()
 	}
-}
-
-func (rf *Raft) applySnapshot() {
-	msg := raftapi.ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      rf.persister.ReadSnapshot(),
-		SnapshotTerm:  rf.lastIncludedTerm,
-		SnapshotIndex: rf.lastIncludedIndex,
-	}
-	rf.lastApplied = rf.lastIncludedIndex
-	rf.mu.Unlock()
-	rf.applyCh <- msg
 }
 
 func (rf *Raft) replicator(peer int) {
@@ -321,8 +317,9 @@ func (rf *Raft) becomeLeader() {
 	lastIndex := rf.getLastLog().Index
 	for i := range rf.peers {
 		rf.nextIndex[i] = lastIndex + 1
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = rf.lastIncludedIndex
 	}
+	rf.matchIndex[rf.me] = lastIndex
 	rf.signalReplication(true)
 	rf.resetHeartbeatTimer()
 }
@@ -486,7 +483,7 @@ func (rf *Raft) advanceCommitIndex(leaderCommit int) {
 		} else {
 			rf.commitIndex = lastIndex
 		}
-		rf.applyCond.Broadcast()
+		rf.applyCond.Signal()
 	}
 }
 
@@ -616,9 +613,17 @@ func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, 
 		return
 	}
 	if rf.state == StateLeader && rf.currentTerm == args.Term {
-		if rf.matchIndex[peer] < args.LastIncludedIndex {
-			rf.matchIndex[peer] = args.LastIncludedIndex
-			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		//if rf.matchIndex[peer] < args.LastIncludedIndex {
+		//	rf.matchIndex[peer] = args.LastIncludedIndex
+		//	rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		//} // TODO old version where the leader was setting to 0 matchIndex[i]
+		newMatch := args.LastIncludedIndex
+		newNext := newMatch + 1
+		if newNext > rf.nextIndex[peer] {
+			rf.nextIndex[peer] = newNext
+		}
+		if newMatch > rf.matchIndex[peer] {
+			rf.matchIndex[peer] = newMatch
 		}
 	}
 }
@@ -692,7 +697,7 @@ func (rf *Raft) updateCommitIndex() {
 	for n := rf.getLen() - 1; n > rf.commitIndex; n-- {
 		if rf.getLog(n).Term == rf.currentTerm && rf.countNodesWithLogAt(n) > len(rf.peers)/2 {
 			rf.commitIndex = n
-			rf.applyCond.Broadcast()
+			rf.applyCond.Signal()
 			break
 		}
 	}
@@ -771,7 +776,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.persister.Save(rf.encodeState(), args.Data)
-	rf.applyCond.Broadcast()
+	rf.applyCond.Signal()
 }
 
 func (rf *Raft) sendInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
