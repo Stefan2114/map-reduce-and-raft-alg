@@ -93,25 +93,21 @@ func (rsm *RSM) Raft() raftapi.Raft {
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
 	id := kvtest.RandValue(8)
 	op := Op{Me: rsm.me, Id: id, Req: req}
+	ch := make(chan result)
+	rsm.mu.Lock()
 
 	index, term, isLeader := rsm.rf.Start(op)
 	if !isLeader {
+		rsm.mu.Unlock()
 		return rpc.ErrWrongLeader, nil
 	}
 
 	raft.DPrintf("[RSM %d] Submit id=%s index=%d term=%d req=%T", rsm.me, id, index, term, req)
-
-	ch := make(chan result)
-	rsm.mu.Lock()
 	rsm.pending[index] = &pendingEntry{id: id, term: term, ch: ch}
 	rsm.mu.Unlock()
 
-	// 4. Wait for the result or a timeout/term change
 	defer func() {
 		rsm.mu.Lock()
 		delete(rsm.pending, index)
@@ -140,7 +136,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 }
 
 func (rsm *RSM) dumpPending() string {
-	// call with mu held or just read for debugging
 	var s string
 	for idx, e := range rsm.pending {
 		s += fmt.Sprintf("idx=%d id=%s term=%d | ", idx, e.id, e.term)
@@ -156,7 +151,7 @@ func (rsm *RSM) reader() {
 			rsm.sm.Restore(msg.Snapshot)
 			for idx, entry := range rsm.pending {
 				if idx <= msg.SnapshotIndex {
-					entry.ch <- result{id: ""} // id="" won't match any real id
+					entry.ch <- result{id: ""}
 					delete(rsm.pending, idx)
 				}
 			}
@@ -188,7 +183,7 @@ func (rsm *RSM) reader() {
 
 		currentTerm, isLeader := rsm.rf.GetState()
 		for idx, entry := range rsm.pending {
-			if idx <= msg.CommandIndex || (!isLeader && entry.term < currentTerm) {
+			if idx < msg.CommandIndex || (!isLeader && entry.term < currentTerm) {
 				entry.ch <- result{id: ""} // mismatch -> ErrWrongLeader
 				delete(rsm.pending, idx)
 			}

@@ -259,6 +259,7 @@ func (rf *Raft) applier() {
 		entries := make([]Entry, pLimit-pStart+1)
 		copy(entries, rf.logs[pStart:pLimit+1])
 
+		rf.lastApplied = limit
 		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.applyCh <- raftapi.ApplyMsg{
@@ -267,12 +268,6 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 			}
 		}
-
-		rf.mu.Lock()
-		if limit > rf.lastApplied {
-			rf.lastApplied = limit
-		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -399,7 +394,8 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v} before processing AppendEntriesArgs %v and reply AppendEntriesReply %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, args, reply)
+	defer DPrintf("{Node %v}'s state is {state %v,term %v,commitIndex %v,lastApplied %v} before processing AppendEntriesArgs %v and reply AppendEntriesReply %v",
+		rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, args, reply)
 
 	reply.Term, reply.Success = rf.currentTerm, false
 
@@ -483,7 +479,7 @@ func (rf *Raft) advanceCommitIndex(leaderCommit int) {
 		} else {
 			rf.commitIndex = lastIndex
 		}
-		rf.applyCond.Signal()
+		rf.applyCond.Broadcast()
 	}
 }
 
@@ -613,10 +609,6 @@ func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, 
 		return
 	}
 	if rf.state == StateLeader && rf.currentTerm == args.Term {
-		//if rf.matchIndex[peer] < args.LastIncludedIndex {
-		//	rf.matchIndex[peer] = args.LastIncludedIndex
-		//	rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-		//} // TODO old version where the leader was setting to 0 matchIndex[i]
 		newMatch := args.LastIncludedIndex
 		newNext := newMatch + 1
 		if newNext > rf.nextIndex[peer] {
@@ -697,7 +689,7 @@ func (rf *Raft) updateCommitIndex() {
 	for n := rf.getLen() - 1; n > rf.commitIndex; n-- {
 		if rf.getLog(n).Term == rf.currentTerm && rf.countNodesWithLogAt(n) > len(rf.peers)/2 {
 			rf.commitIndex = n
-			rf.applyCond.Signal()
+			rf.applyCond.Broadcast()
 			break
 		}
 	}
@@ -776,7 +768,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.persister.Save(rf.encodeState(), args.Data)
-	rf.applyCond.Signal()
+	rf.applyCond.Broadcast()
 }
 
 func (rf *Raft) sendInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
