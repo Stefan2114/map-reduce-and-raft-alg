@@ -42,10 +42,11 @@ type Raft struct {
 	applyCh        chan raftapi.ApplyMsg
 	applyCond      *sync.Cond
 	replicatorCond []*sync.Cond
-	state          NodeState
-	currentTerm    int
-	votedFor       int
-	logs           []Entry
+
+	state       NodeState
+	currentTerm int
+	votedFor    int
+	logs        []Entry
 
 	commitIndex int
 	lastApplied int
@@ -130,7 +131,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, entry)
 	rf.persist()
 	DPrintf("{Node %v} receives a new command(index: %v, term: %v) to replicate in term %v", rf.me, newIndex, newTerm, rf.currentTerm)
-	rf.signalReplication(false)
+	rf.signalBroadcastReplication(false)
 	return newIndex, newTerm, true
 }
 
@@ -216,7 +217,7 @@ func (rf *Raft) ticker() {
 		case <-rf.heartBeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == StateLeader {
-				rf.signalReplication(true)
+				rf.signalBroadcastReplication(true)
 				rf.resetHeartbeatTimer()
 			}
 			rf.mu.Unlock()
@@ -271,6 +272,10 @@ func (rf *Raft) applier() {
 	}
 }
 
+func (rf *Raft) signalApplier() {
+	rf.applyCond.Signal()
+}
+
 func (rf *Raft) replicator(peer int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -287,6 +292,10 @@ func (rf *Raft) replicator(peer int) {
 
 func (rf *Raft) needsReplication(peer int) bool {
 	return rf.state == StateLeader && rf.matchIndex[peer] < rf.getLastLog().Index
+}
+
+func (rf *Raft) signalReplication(peer int) {
+	rf.replicatorCond[peer].Signal()
 }
 
 func (rf *Raft) resetElectionTimer() {
@@ -315,7 +324,7 @@ func (rf *Raft) becomeLeader() {
 		rf.matchIndex[i] = rf.lastIncludedIndex
 	}
 	rf.matchIndex[rf.me] = lastIndex
-	rf.signalReplication(true)
+	rf.signalBroadcastReplication(true)
 	rf.resetHeartbeatTimer()
 }
 
@@ -479,7 +488,7 @@ func (rf *Raft) advanceCommitIndex(leaderCommit int) {
 		} else {
 			rf.commitIndex = lastIndex
 		}
-		rf.applyCond.Broadcast()
+		rf.signalApplier()
 	}
 }
 
@@ -533,7 +542,7 @@ func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs, grantedVote
 	}
 }
 
-func (rf *Raft) signalReplication(isHeartbeat bool) {
+func (rf *Raft) signalBroadcastReplication(isHeartbeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -541,7 +550,7 @@ func (rf *Raft) signalReplication(isHeartbeat bool) {
 		if isHeartbeat {
 			go rf.replicateToPeer(peer)
 		} else {
-			rf.replicatorCond[peer].Signal()
+			rf.signalReplication(peer)
 		}
 	}
 }
@@ -648,7 +657,7 @@ func (rf *Raft) shouldIgnoreReply(argsTerm int, replyTerm int) bool {
 func (rf *Raft) resolveConflict(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	if args.PrevLogIndex < rf.lastIncludedIndex {
-		rf.replicatorCond[peer].Signal()
+		rf.signalReplication(peer)
 		return
 	}
 
@@ -665,7 +674,7 @@ func (rf *Raft) resolveConflict(peer int, args *AppendEntriesArgs, reply *Append
 	}
 	DPrintf("{Node %v} sets nextIndex[%v]=%v, leader lastIncludedIndex=%v",
 		rf.me, peer, rf.nextIndex[peer], rf.lastIncludedIndex)
-	rf.replicatorCond[peer].Signal()
+	rf.signalReplication(peer)
 }
 
 func (rf *Raft) findLastIndexOfTerm(term int, startSearch int) int {
@@ -689,7 +698,8 @@ func (rf *Raft) updateCommitIndex() {
 	for n := rf.getLen() - 1; n > rf.commitIndex; n-- {
 		if rf.getLog(n).Term == rf.currentTerm && rf.countNodesWithLogAt(n) > len(rf.peers)/2 {
 			rf.commitIndex = n
-			rf.applyCond.Broadcast()
+			DPrintf("{Node %v} commitIndex advanced to %v in term %v", rf.me, rf.commitIndex, rf.currentTerm)
+			rf.signalApplier()
 			break
 		}
 	}
@@ -768,7 +778,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	rf.persister.Save(rf.encodeState(), args.Data)
-	rf.applyCond.Broadcast()
+	rf.signalApplier()
 }
 
 func (rf *Raft) sendInstallSnapshot(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
