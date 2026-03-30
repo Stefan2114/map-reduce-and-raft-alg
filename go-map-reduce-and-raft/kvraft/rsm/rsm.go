@@ -52,6 +52,7 @@ type RSM struct {
 	maxRaftState int // snapshot if log grows this big
 	sm           StateMachine
 	pending      map[int]*pendingEntry
+	lastApplied  int
 }
 
 // servers[] contains the ports of the set of
@@ -80,6 +81,11 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	if snapshot := persister.ReadSnapshot(); len(snapshot) > 0 {
+		rsm.sm.Restore(snapshot)
+	}
+	raft.DPrintf("[RSM %d] MakeRSM maxRaftState=%d", me, maxRaftState)
+
 	go rsm.reader()
 	return rsm
 }
@@ -146,62 +152,109 @@ func (rsm *RSM) dumpPending() string {
 func (rsm *RSM) reader() {
 	for msg := range rsm.applyCh {
 		if msg.SnapshotValid {
-			raft.DPrintf("[RSM %d] reader: snapshot index=%d", rsm.me, msg.SnapshotIndex)
-			rsm.mu.Lock()
-			rsm.sm.Restore(msg.Snapshot)
-			for idx, entry := range rsm.pending {
-				if idx <= msg.SnapshotIndex {
-					entry.ch <- result{id: ""}
-					delete(rsm.pending, idx)
-				}
-			}
-			rsm.mu.Unlock()
-			continue
-		}
-
-		if !msg.CommandValid {
+			rsm.handleSnapshot(msg)
+		} else if msg.CommandValid {
+			rsm.handleCommand(msg)
+		} else {
 			raft.DPrintf("[RSM %d] reader: invalid command msg", rsm.me)
-			continue
 		}
-
-		op, ok := msg.Command.(Op)
-		if !ok {
-			raft.DPrintf("[RSM %d] reader: command not Op type: %T", rsm.me, msg.Command)
-			continue
-		}
-
-		raft.DPrintf("[RSM %d] reader: applying index=%d op.id=%s op.Me=%d", rsm.me, msg.CommandIndex, op.Id, op.Me)
-		ret := rsm.sm.DoOp(op.Req)
-
-		rsm.mu.Lock()
-		if entry, exists := rsm.pending[msg.CommandIndex]; exists {
-			raft.DPrintf("[RSM %d] reader: notifying pending index=%d id=%s matches=%v",
-				rsm.me, msg.CommandIndex, op.Id, entry.id == op.Id)
-			entry.ch <- result{id: op.Id, val: ret}
-			delete(rsm.pending, msg.CommandIndex)
-		}
-
-		currentTerm, isLeader := rsm.rf.GetState()
-		for idx, entry := range rsm.pending {
-			if idx < msg.CommandIndex || (!isLeader && entry.term < currentTerm) {
-				entry.ch <- result{id: ""} // mismatch -> ErrWrongLeader
-				delete(rsm.pending, idx)
-			}
-		}
-
-		if rsm.maxRaftState != -1 && rsm.rf.PersistBytes() >= rsm.maxRaftState {
-			snap := rsm.sm.Snapshot()
-			rsm.rf.Snapshot(msg.CommandIndex, snap)
-		}
-
-		rsm.mu.Unlock()
 	}
+	rsm.cleanup()
+}
+
+func (rsm *RSM) handleSnapshot(msg raftapi.ApplyMsg) {
+	raft.DPrintf("[RSM %d] reader: snapshot index=%d", rsm.me, msg.SnapshotIndex)
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+
+	// TODO see if i need this here
+	if msg.SnapshotIndex <= rsm.lastApplied {
+		panic("RSM got here ups")
+		return
+	}
+
+	rsm.sm.Restore(msg.Snapshot)
+	rsm.lastApplied = msg.SnapshotIndex
+	rsm.notifyOutdated(msg.SnapshotIndex)
+}
+
+func (rsm *RSM) handleCommand(msg raftapi.ApplyMsg) {
+	op, ok := msg.Command.(Op)
+
+	if !ok {
+		raft.DPrintf("[RSM %d] reader: command not Op type: %T", rsm.me, msg.Command)
+		return
+	}
+
+	raft.DPrintf("[RSM %d] reader: applying index=%d op.id=%s op.Me=%d", rsm.me, msg.CommandIndex, op.Id, op.Me)
+
+	rsm.mu.Lock()
+	if msg.CommandIndex <= rsm.lastApplied {
+		raft.DPrintf("[RSM %d] reader: discarding stale index=%d lastApplied=%d",
+			rsm.me, msg.CommandIndex, rsm.lastApplied)
+		rsm.mu.Unlock()
+		return
+	}
+	rsm.lastApplied = msg.CommandIndex
+	rsm.mu.Unlock()
+
+	// Execute operation
+	resultVal := rsm.sm.DoOp(op.Req)
+
+	rsm.mu.Lock()
+	rsm.notifyPending(msg.CommandIndex, op.Id, resultVal)
+	rsm.checkSnapshot(msg.CommandIndex)
+	rsm.mu.Unlock()
+}
+
+func (rsm *RSM) notifyPending(index int, id string, val any) {
+	_, isLeader := rsm.rf.GetState()
+	entry, exists := rsm.pending[index]
+
+	if exists {
+		raft.DPrintf("[RSM %d] reader: notifying pending index=%d id=%s matches=%v",
+			rsm.me, index, id, entry.id == id)
+		// Only succeed if we are still leader and the ID matches [cite: 135-136]
+		if isLeader && entry.id == id {
+			entry.ch <- result{id: id, val: val}
+		} else {
+			entry.ch <- result{id: ""} // Forces client retry
+		}
+		delete(rsm.pending, index)
+	}
+	rsm.notifyOutdated(index) // Clean up any other entries that can't possibly succeed now
+}
+
+func (rsm *RSM) notifyOutdated(index int) {
+	currentTerm, isLeader := rsm.rf.GetState()
+	for idx, entry := range rsm.pending {
+		// if idx <= index || (!isLeader && entry.term < currentTerm) {
+		if idx <= index || !isLeader || entry.term != currentTerm {
+			if !isLeader && entry.term == currentTerm {
+				panic("Got here ups2")
+			}
+			entry.ch <- result{id: ""}
+			delete(rsm.pending, idx)
+		}
+	}
+}
+
+func (rsm *RSM) checkSnapshot(index int) {
+	if rsm.maxRaftState != -1 && rsm.rf.PersistBytes() >= rsm.maxRaftState {
+		raft.DPrintf("[RSM %d] taking snapshot at index=%d persistBytes=%d threshold=%d",
+			rsm.me, index, rsm.rf.PersistBytes(), rsm.maxRaftState)
+		snapshot := rsm.sm.Snapshot()
+		rsm.rf.Snapshot(index, snapshot)
+	}
+}
+
+func (rsm *RSM) cleanup() {
 	raft.DPrintf("[RSM %d] reader: applyCh closed, waking all pending", rsm.me)
 	// applyCh closed: wake up all waiting Submit() calls
 	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
 	for _, entry := range rsm.pending {
 		close(entry.ch)
 	}
 	rsm.pending = make(map[int]*pendingEntry)
-	rsm.mu.Unlock()
 }

@@ -22,13 +22,6 @@ func MakeClerk(client *tester.Client, server string) kvtest.IKVClerk {
 // Get fetches the current value and version for a key.  It returns
 // ErrNoKey if the key does not exist. It keeps trying forever in the
 // face of all other errors.
-//
-// You can send an RPC with code like this:
-// ok := ck.client.Call(ck.server, "KVServer.Get", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.TVersion, rpc.Err) {
 
 	args := rpc.GetArgs{Key: key}
@@ -47,7 +40,6 @@ func (ck *Clerk) Get(key string) (string, rpc.TVersion, rpc.Err) {
 	}
 }
 
-// TODO
 // Put updates key with value only if the version in the
 // request matches the version of the key at the server.  If the
 // versions numbers don't match, the server should return
@@ -58,13 +50,6 @@ func (ck *Clerk) Get(key string) (string, rpc.TVersion, rpc.Err) {
 // its earlier RPC might have been processed by the server successfully
 // but the response was lost, and the Clerk doesn't know if
 // the Put was performed or not.
-//
-// You can send an RPC with code like this:
-// ok := ck.client.Call(ck.server, "KVServer.Put", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.TVersion) rpc.Err {
 
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}

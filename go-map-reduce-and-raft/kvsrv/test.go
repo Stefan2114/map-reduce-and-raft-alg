@@ -27,7 +27,7 @@ func MakeTestKV(t *testing.T, reliable bool) *TestKV {
 func (ts *TestKV) MakeClerk() kvtest.IKVClerk {
 	clnt := ts.Config.MakeClient()
 	ck := MakeClerk(clnt, tester.ServerName(tester.GRP0, 0))
-	return &kvtest.TestClerk{ck, clnt}
+	return &kvtest.TestClerk{IKVClerk: ck, Clnt: clnt}
 }
 
 func (ts *TestKV) DeleteClerk(ck kvtest.IKVClerk) {
