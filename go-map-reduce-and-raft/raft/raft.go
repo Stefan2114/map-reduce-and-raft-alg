@@ -226,6 +226,7 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applier() {
+	defer close(rf.applyCh)
 
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -626,6 +627,7 @@ func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, 
 		if newMatch > rf.matchIndex[peer] {
 			rf.matchIndex[peer] = newMatch
 		}
+		rf.signalReplication(peer)
 	}
 }
 
@@ -691,6 +693,7 @@ func (rf *Raft) advancePeerIndices(peer int, args *AppendEntriesArgs) {
 	if newMatch > rf.matchIndex[peer] {
 		rf.matchIndex[peer] = newMatch
 		rf.nextIndex[peer] = newMatch + 1
+		rf.signalReplication(peer)
 	}
 }
 
@@ -829,6 +832,7 @@ func (rf *Raft) isStillValidCandidate(electionTerm int) bool {
 
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	rf.signalApplier()
 }
 
 func (rf *Raft) killed() bool {
