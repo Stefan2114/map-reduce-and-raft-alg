@@ -10,17 +10,15 @@ import (
 	"go-map-reduce-and-raft/labgob"
 	"go-map-reduce-and-raft/labrpc"
 	"go-map-reduce-and-raft/raftapi"
-
 )
 
 const (
 	SnapShotInterval = 10
 )
 
-var useRaftStateMachine bool // to plug in another raft besided raft
+var useRaftStateMachine bool // to plug in another raft besides raft1
 
-
-type rfsrv struct {
+type raftServer struct {
 	ts          *Test
 	me          int
 	applyErr    string // from apply channel readers
@@ -32,9 +30,9 @@ type rfsrv struct {
 	logs map[int]any // copy of each server's committed entries
 }
 
-func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *rfsrv {
-	//log.Printf("mksrv %d", srv)
-	s := &rfsrv{
+func newRaftServer(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *raftServer {
+	//log.Printf("makeRaftServer %d", srv)
+	s := &raftServer{
 		ts:        ts,
 		me:        srv,
 		logs:      map[int]any{},
@@ -62,7 +60,7 @@ func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Per
 	return s
 }
 
-func (rs *rfsrv) Kill() {
+func (rs *raftServer) Kill() {
 	//log.Printf("rs kill %d", rs.me)
 	rs.mu.Lock()
 	rs.raft = nil // tester will call Kill() on rs.raft
@@ -70,25 +68,25 @@ func (rs *rfsrv) Kill() {
 	if rs.persister != nil {
 		// mimic KV server that saves its persistent state in case it
 		// restarts.
-		raftlog := rs.persister.ReadRaftState()
+		raftLog := rs.persister.ReadRaftState()
 		snapshot := rs.persister.ReadSnapshot()
-		rs.persister.Save(raftlog, snapshot)
+		rs.persister.Save(raftLog, snapshot)
 	}
 }
 
-func (rs *rfsrv) GetState() (int, bool) {
+func (rs *raftServer) GetState() (int, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.raft.GetState()
 }
 
-func (rs *rfsrv) Raft() raftapi.Raft {
+func (rs *raftServer) Raft() raftapi.Raft {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.raft
 }
 
-func (rs *rfsrv) Logs(i int) (any, bool) {
+func (rs *raftServer) Logs(i int) (any, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	v, ok := rs.logs[i]
@@ -97,19 +95,19 @@ func (rs *rfsrv) Logs(i int) (any, bool) {
 
 // applier reads message from apply ch and checks that they match the log
 // contents
-func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
+func (rs *raftServer) applier(applyCh chan raftapi.ApplyMsg) {
 	for m := range applyCh {
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
 		} else {
-			err_msg, prevok := rs.ts.checkLogs(rs.me, m)
-			if m.CommandIndex > 1 && prevok == false {
-				err_msg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
+			errMsg, prevOk := rs.ts.checkLogs(rs.me, m)
+			if m.CommandIndex > 1 && prevOk == false {
+				errMsg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
 			}
-			if err_msg != "" {
-				tester.AnnotateCheckerFailureBeforeExit("apply error", err_msg)
-				log.Fatalf("apply error: %v", err_msg)
-				rs.applyErr = err_msg
+			if errMsg != "" {
+				tester.AnnotateCheckerFailureBeforeExit("apply error", errMsg)
+				log.Fatalf("apply error: %v", errMsg)
+				rs.applyErr = errMsg
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
@@ -118,25 +116,25 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 }
 
 // periodically snapshot raft state
-func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
+func (rs *raftServer) applierSnap(applyCh chan raftapi.ApplyMsg) {
 	if rs.raft == nil {
 		return // ???
 	}
 
 	for m := range applyCh {
-		err_msg := ""
+		errMsg := ""
 		if m.SnapshotValid {
-			err_msg = rs.ingestSnap(m.Snapshot, m.SnapshotIndex)
+			errMsg = rs.ingestSnap(m.Snapshot, m.SnapshotIndex)
 		} else if m.CommandValid {
 			if m.CommandIndex != rs.lastApplied+1 {
-				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", rs.me, rs.lastApplied+1, m.CommandIndex)
+				errMsg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", rs.me, rs.lastApplied+1, m.CommandIndex)
 			}
 
-			if err_msg == "" {
-				var prevok bool
-				err_msg, prevok = rs.ts.checkLogs(rs.me, m)
-				if m.CommandIndex > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
+			if errMsg == "" {
+				var prevOk bool
+				errMsg, prevOk = rs.ts.checkLogs(rs.me, m)
+				if m.CommandIndex > 1 && prevOk == false {
+					errMsg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
 				}
 			}
 
@@ -146,11 +144,11 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
 				e.Encode(m.CommandIndex)
-				var xlog []any
+				var xLog []any
 				for j := 0; j <= m.CommandIndex; j++ {
-					xlog = append(xlog, rs.logs[j])
+					xLog = append(xLog, rs.logs[j])
 				}
-				e.Encode(xlog)
+				e.Encode(xLog)
 				start := tester.GetAnnotateTimestamp()
 				rs.raft.Snapshot(m.CommandIndex, w.Bytes())
 				details := fmt.Sprintf(
@@ -161,10 +159,10 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 		} else {
 			// Ignore other types of ApplyMsg.
 		}
-		if err_msg != "" {
-			tester.AnnotateCheckerFailureBeforeExit("apply error", err_msg)
-			log.Fatalf("apply error: %v", err_msg)
-			rs.applyErr = err_msg
+		if errMsg != "" {
+			tester.AnnotateCheckerFailureBeforeExit("apply error", errMsg)
+			log.Fatalf("apply error: %v", errMsg)
+			rs.applyErr = errMsg
 			// keep reading after error so that Raft doesn't block
 			// holding locks...
 		}
@@ -172,7 +170,7 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 }
 
 // returns "" or error string
-func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
+func (rs *raftServer) ingestSnap(snapshot []byte, index int) string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -184,9 +182,9 @@ func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var lastIncludedIndex int
-	var xlog []any
+	var xLog []any
 	if d.Decode(&lastIncludedIndex) != nil ||
-		d.Decode(&xlog) != nil {
+		d.Decode(&xLog) != nil {
 		text := "failed to decode snapshot"
 		tester.AnnotateCheckerFailureBeforeExit(text, text)
 		log.Fatalf("snapshot decode error")
@@ -197,8 +195,8 @@ func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
 		return err
 	}
 	rs.logs = map[int]any{}
-	for j := 0; j < len(xlog); j++ {
-		rs.logs[j] = xlog[j]
+	for j := 0; j < len(xLog); j++ {
+		rs.logs[j] = xLog[j]
 	}
 	rs.lastApplied = lastIncludedIndex
 	return ""

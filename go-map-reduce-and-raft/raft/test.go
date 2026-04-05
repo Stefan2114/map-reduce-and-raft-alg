@@ -23,7 +23,7 @@ type Test struct {
 	finished int32
 
 	mu       sync.Mutex
-	srvs     []*rfsrv
+	servers  []*raftServer
 	maxIndex int
 	snapshot bool
 }
@@ -32,10 +32,10 @@ func makeTest(t *testing.T, n int, reliable bool, snapshot bool) *Test {
 	ts := &Test{
 		t:        t,
 		n:        n,
-		srvs:     make([]*rfsrv, n),
+		servers:  make([]*raftServer, n),
 		snapshot: snapshot,
 	}
-	ts.Config = tester.MakeConfig(t, n, reliable, ts.mksrv)
+	ts.Config = tester.MakeConfig(t, n, reliable, ts.makeServer)
 	ts.Config.SetLongDelays(true)
 	ts.g = ts.Group(tester.GRP0)
 	return ts
@@ -48,16 +48,16 @@ func (ts *Test) cleanup() {
 	ts.CheckTimeout()
 }
 
-func (ts *Test) mksrv(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persister *tester.Persister) []tester.IService {
-	s := newRfsrv(ts, srv, ends, persister, ts.snapshot)
+func (ts *Test) makeServer(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persister *tester.Persister) []tester.IService {
+	s := newRaftServer(ts, srv, ends, persister, ts.snapshot)
 	ts.mu.Lock()
-	ts.srvs[srv] = s
+	ts.servers[srv] = s
 	ts.mu.Unlock()
 	return []tester.IService{s, s.raft}
 }
 
 func (ts *Test) restart(i int) {
-	ts.g.StartServer(i) // which will call mksrv to make a new server
+	ts.g.StartServer(i) // which will call makeServer to make a new server
 	ts.Group(tester.GRP0).ConnectAll()
 }
 
@@ -70,7 +70,7 @@ func (ts *Test) checkOneLeader() int {
 		leaders := make(map[int][]int)
 		for i := 0; i < ts.n; i++ {
 			if ts.g.IsConnected(i) {
-				if term, leader := ts.srvs[i].GetState(); leader {
+				if term, leader := ts.servers[i].GetState(); leader {
 					leaders[term] = append(leaders[term], i)
 				}
 			}
@@ -106,7 +106,7 @@ func (ts *Test) checkTerms() int {
 	term := -1
 	for i := 0; i < ts.n; i++ {
 		if ts.g.IsConnected(i) {
-			xterm, _ := ts.srvs[i].GetState()
+			xterm, _ := ts.servers[i].GetState()
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
@@ -126,23 +126,23 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
-	err_msg := ""
+	errMsg := ""
 	v := m.Command
-	me := ts.srvs[i]
-	for j, rs := range ts.srvs {
-		if old, oldok := rs.Logs(m.CommandIndex); oldok && old != v {
+	me := ts.servers[i]
+	for j, rs := range ts.servers {
+		if old, oldOk := rs.Logs(m.CommandIndex); oldOk && old != v {
 			//log.Printf("%v: log %v; server %v\n", i, me.logs, rs.logs)
 			// some server has already committed a different value for this entry!
-			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
+			errMsg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
-	_, prevok := me.logs[m.CommandIndex-1]
+	_, prevOk := me.logs[m.CommandIndex-1]
 	me.logs[m.CommandIndex] = v
 	if m.CommandIndex > ts.maxIndex {
 		ts.maxIndex = m.CommandIndex
 	}
-	return err_msg, prevok
+	return errMsg, prevOk
 }
 
 // check that none of the connected servers
@@ -151,8 +151,8 @@ func (ts *Test) checkNoLeader() {
 	tester.AnnotateCheckerBegin("checking no unexpected leader among connected servers")
 	for i := 0; i < ts.n; i++ {
 		if ts.g.IsConnected(i) {
-			_, is_leader := ts.srvs[i].GetState()
-			if is_leader {
+			_, isLeader := ts.servers[i].GetState()
+			if isLeader {
 				details := fmt.Sprintf("leader = %v", i)
 				tester.AnnotateCheckerFailure("unexpected leader found", details)
 				ts.Fatalf(details)
@@ -167,13 +167,13 @@ func (ts *Test) checkNoAgreement(index int) {
 	tester.AnnotateCheckerBegin(text)
 	n, _ := ts.nCommitted(index)
 	if n > 0 {
-		desp := fmt.Sprintf("unexpected agreement at index %v", index)
+		description := fmt.Sprintf("unexpected agreement at index %v", index)
 		details := fmt.Sprintf("%v server(s) commit incorrectly index", n)
-		tester.AnnotateCheckerFailure(desp, details)
+		tester.AnnotateCheckerFailure(description, details)
 		ts.Fatalf("%v committed but no majority", n)
 	}
-	desp := fmt.Sprintf("no unexpected agreement at index %v", index)
-	tester.AnnotateCheckerSuccess(desp, "OK")
+	description := fmt.Sprintf("no unexpected agreement at index %v", index)
+	tester.AnnotateCheckerSuccess(description, "OK")
 }
 
 // how many servers think a log entry is committed?
@@ -183,7 +183,7 @@ func (ts *Test) nCommitted(index int) (int, any) {
 
 	count := 0
 	var cmd any = nil
-	for _, rs := range ts.srvs {
+	for _, rs := range ts.servers {
 		if rs.applyErr != "" {
 			tester.AnnotateCheckerFailure("apply error", rs.applyErr)
 			ts.t.Fatal(rs.applyErr)
@@ -218,28 +218,28 @@ func (ts *Test) nCommitted(index int) (int, any) {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 3B tests.
 func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
-	var textretry string
+	var textRetry string
 	if retry {
-		textretry = "with"
+		textRetry = "with"
 	} else {
-		textretry = "without"
+		textRetry = "without"
 	}
-	textcmd := fmt.Sprintf("%v", cmd)
-	textb := fmt.Sprintf("checking agreement of %.8s by at least %v servers %v retry",
-		textcmd, expectedServers, textretry)
-	tester.AnnotateCheckerBegin(textb)
+	textCmd := fmt.Sprintf("%v", cmd)
+	textBegin := fmt.Sprintf("checking agreement of %.8s by at least %v servers %v retry",
+		textCmd, expectedServers, textRetry)
+	tester.AnnotateCheckerBegin(textBegin)
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 && ts.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
-		for range ts.srvs {
-			starts = (starts + 1) % len(ts.srvs)
+		for range ts.servers {
+			starts = (starts + 1) % len(ts.servers)
 			var rf raftapi.Raft
 			if ts.g.IsConnected(starts) {
-				ts.srvs[starts].mu.Lock()
-				rf = ts.srvs[starts].raft
-				ts.srvs[starts].mu.Unlock()
+				ts.servers[starts].mu.Lock()
+				rf = ts.servers[starts].raft
+				ts.servers[starts].mu.Unlock()
 			}
 			if rf != nil {
 				//log.Printf("peer %d Start %v", starts, cmd)
@@ -261,16 +261,16 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
-						desp := fmt.Sprintf("agreement of %.8s reached", textcmd)
-						tester.AnnotateCheckerSuccess(desp, "OK")
+						description := fmt.Sprintf("agreement of %.8s reached", textCmd)
+						tester.AnnotateCheckerSuccess(description, "OK")
 						return index
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				desp := fmt.Sprintf("agreement of %.8s failed", textcmd)
-				tester.AnnotateCheckerFailure(desp, "failed after submitting command")
+				description := fmt.Sprintf("agreement of %.8s failed", textCmd)
+				tester.AnnotateCheckerFailure(description, "failed after submitting command")
 				ts.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -278,8 +278,8 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 		}
 	}
 	if ts.checkFinished() == false {
-		desp := fmt.Sprintf("agreement of %.8s failed", textcmd)
-		tester.AnnotateCheckerFailure(desp, "failed after 10-second timeout")
+		description := fmt.Sprintf("agreement of %.8s failed", textCmd)
+		tester.AnnotateCheckerFailure(description, "failed after 10-second timeout")
 		ts.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
@@ -304,7 +304,7 @@ func (ts *Test) wait(index int, n int, startTerm int) any {
 			to *= 2
 		}
 		if startTerm > -1 {
-			for _, rs := range ts.srvs {
+			for _, rs := range ts.servers {
 				if t, _ := rs.raft.GetState(); t > startTerm {
 					// someone has moved on
 					// can no longer guarantee that we'll "win"
@@ -315,10 +315,10 @@ func (ts *Test) wait(index int, n int, startTerm int) any {
 	}
 	nd, cmd := ts.nCommitted(index)
 	if nd < n {
-		desp := fmt.Sprintf("less than %v servers commit index %v", n, index)
+		description := fmt.Sprintf("less than %v servers commit index %v", n, index)
 		details := fmt.Sprintf(
 			"only %v (< %v) servers commit index %v at term %v", nd, n, index, startTerm)
-		tester.AnnotateCheckerFailure(desp, details)
+		tester.AnnotateCheckerFailure(description, details)
 		ts.Fatalf("only %d decided for index %d; wanted %d",
 			nd, index, n)
 	}

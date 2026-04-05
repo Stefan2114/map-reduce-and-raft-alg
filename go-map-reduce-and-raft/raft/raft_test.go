@@ -146,9 +146,9 @@ func TestBasicAgree3B(t *testing.T) {
 			t.Fatalf("some have committed before Start()")
 		}
 
-		xindex := ts.one(index*100, servers, false)
-		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
+		xIndex := ts.one(index*100, servers, false)
+		if xIndex != index {
+			t.Fatalf("got index %v but expected %v", xIndex, index)
 		}
 	}
 }
@@ -170,9 +170,9 @@ func TestRPCBytes3B(t *testing.T) {
 	var sent int64 = 0
 	for index := 2; index < iters+2; index++ {
 		cmd := tester.Randstring(5000)
-		xindex := ts.one(cmd, servers, false)
-		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
+		xIndex := ts.one(cmd, servers, false)
+		if xIndex != index {
+			t.Fatalf("got index %v but expected %v", xIndex, index)
 		}
 		sent += int64(len(cmd))
 	}
@@ -215,7 +215,7 @@ func TestFollowerFailure3B(t *testing.T) {
 	tester.AnnotateConnection(ts.g.GetConnected())
 
 	// submit a command.
-	index, _, ok := ts.srvs[leader2].Raft().Start(104)
+	index, _, ok := ts.servers[leader2].Raft().Start(104)
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
@@ -258,7 +258,7 @@ func TestLeaderFailure3B(t *testing.T) {
 
 	// submit a command to each server.
 	for i := 0; i < servers; i++ {
-		ts.srvs[i].Raft().Start(104)
+		ts.servers[i].Raft().Start(104)
 	}
 
 	time.Sleep(2 * RaftElectionTimeout)
@@ -321,7 +321,7 @@ func TestFailNoAgree3B(t *testing.T) {
 	ts.g.DisconnectAll((leader + 3) % servers)
 	tester.AnnotateConnection(ts.g.GetConnected())
 
-	index, _, ok := ts.srvs[leader].Raft().Start(20)
+	index, _, ok := ts.servers[leader].Raft().Start(20)
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
@@ -345,7 +345,7 @@ func TestFailNoAgree3B(t *testing.T) {
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := ts.checkOneLeader()
-	index2, _, ok2 := ts.srvs[leader2].Raft().Start(30)
+	index2, _, ok2 := ts.servers[leader2].Raft().Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
@@ -373,15 +373,15 @@ loop:
 		}
 
 		leader := ts.checkOneLeader()
-		textb := fmt.Sprintf("checking concurrent submission of commands (attempt %v)", try)
-		tester.AnnotateCheckerBegin(textb)
-		_, term, ok := ts.srvs[leader].Raft().Start(1)
+		textBegin := fmt.Sprintf("checking concurrent submission of commands (attempt %v)", try)
+		tester.AnnotateCheckerBegin(textBegin)
+		_, term, ok := ts.servers[leader].Raft().Start(1)
 
-		despretry := "concurrent submission failed; retry"
+		descriptionRetry := "concurrent submission failed; retry"
 		if !ok {
 			// leader moved on really quickly
 			details := fmt.Sprintf("%v is no longer a leader", leader)
-			tester.AnnotateCheckerNeutral(despretry, details)
+			tester.AnnotateCheckerNeutral(descriptionRetry, details)
 			continue
 		}
 
@@ -392,7 +392,7 @@ loop:
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				i, term1, ok := ts.srvs[leader].Raft().Start(100 + i)
+				i, term1, ok := ts.servers[leader].Raft().Start(100 + i)
 				if term1 != term {
 					return
 				}
@@ -407,11 +407,11 @@ loop:
 		close(is)
 
 		for j := 0; j < servers; j++ {
-			if t, _ := ts.srvs[j].Raft().GetState(); t != term {
+			if t, _ := ts.servers[j].Raft().GetState(); t != term {
 				// term changed -- can't expect low RPC counts
 				details := fmt.Sprintf("term of server %v changed from %v to %v",
 					j, term, t)
-				tester.AnnotateCheckerNeutral(despretry, details)
+				tester.AnnotateCheckerNeutral(descriptionRetry, details)
 				continue loop
 			}
 		}
@@ -429,7 +429,7 @@ loop:
 					details := fmt.Sprintf(
 						"term changed while waiting for %v servers to commit index %v",
 						servers, index)
-					tester.AnnotateCheckerNeutral(despretry, details)
+					tester.AnnotateCheckerNeutral(descriptionRetry, details)
 					break
 				}
 				cmds = append(cmds, ix)
@@ -496,9 +496,9 @@ func TestRejoin3B(t *testing.T) {
 
 	// make old leader try to agree on some entries
 	start := tester.GetAnnotateTimestamp()
-	ts.srvs[leader1].Raft().Start(102)
-	ts.srvs[leader1].Raft().Start(103)
-	ts.srvs[leader1].Raft().Start(104)
+	ts.servers[leader1].Raft().Start(102)
+	ts.servers[leader1].Raft().Start(103)
+	ts.servers[leader1].Raft().Start(104)
 	text := fmt.Sprintf("submitted commands [102 103 104] to %v", leader1)
 	tester.AnnotateInfoInterval(start, text, text)
 
@@ -542,7 +542,7 @@ func TestBackup3B(t *testing.T) {
 	// submit lots of commands that won't commit
 	start := tester.GetAnnotateTimestamp()
 	for i := 0; i < 50; i++ {
-		ts.srvs[leader1].Raft().Start(rand.Int())
+		ts.servers[leader1].Raft().Start(rand.Int())
 	}
 	text := fmt.Sprintf("submitted 50 commands to %v", leader1)
 	tester.AnnotateInfoInterval(start, text, text)
@@ -575,7 +575,7 @@ func TestBackup3B(t *testing.T) {
 	// lots more commands that won't commit
 	start = tester.GetAnnotateTimestamp()
 	for i := 0; i < 50; i++ {
-		ts.srvs[leader2].Raft().Start(rand.Int())
+		ts.servers[leader2].Raft().Start(rand.Int())
 	}
 	text = fmt.Sprintf("submitted 50 commands to %v", leader2)
 	tester.AnnotateInfoInterval(start, text, text)
@@ -639,17 +639,17 @@ loop:
 		}
 
 		leader = ts.checkOneLeader()
-		textb := fmt.Sprintf("checking reasonable RPC counts for agreement (attempt %v)", try)
-		tester.AnnotateCheckerBegin(textb)
+		textBegin := fmt.Sprintf("checking reasonable RPC counts for agreement (attempt %v)", try)
+		tester.AnnotateCheckerBegin(textBegin)
 		total1 = rpcs()
 
 		iters := 10
-		starti, term, ok := ts.srvs[leader].Raft().Start(1)
-		despretry := "submission failed; retry"
+		startI, term, ok := ts.servers[leader].Raft().Start(1)
+		descriptionRetry := "submission failed; retry"
 		if !ok {
 			// leader moved on really quickly
 			details := fmt.Sprintf("%v is no longer a leader", leader)
-			tester.AnnotateCheckerNeutral(despretry, details)
+			tester.AnnotateCheckerNeutral(descriptionRetry, details)
 			continue
 		}
 
@@ -657,57 +657,57 @@ loop:
 		for i := 1; i < iters+2; i++ {
 			x := int(rand.Int31())
 			cmds = append(cmds, x)
-			index1, term1, ok := ts.srvs[leader].Raft().Start(x)
+			index1, term1, ok := ts.servers[leader].Raft().Start(x)
 			if term1 != term {
-				// Term changed while starting
+				// Term changed while startIng
 				details := fmt.Sprintf("term of the leader (%v) changed from %v to %v",
 					leader, term, term1)
-				tester.AnnotateCheckerNeutral(despretry, details)
+				tester.AnnotateCheckerNeutral(descriptionRetry, details)
 				continue loop
 			}
 			if !ok {
 				// No longer the leader, so term has changed
 				details := fmt.Sprintf("%v is no longer a leader", leader)
-				tester.AnnotateCheckerNeutral(despretry, details)
+				tester.AnnotateCheckerNeutral(descriptionRetry, details)
 				continue loop
 			}
-			if starti+i != index1 {
+			if startI+i != index1 {
 				desp := fmt.Sprintf("leader %v adds the command at the wrong index", leader)
 				details := fmt.Sprintf(
 					"the command should locate at index %v, but the leader puts it at %v",
-					starti+i, index1)
+					startI+i, index1)
 				tester.AnnotateCheckerFailure(desp, details)
 				t.Fatalf("Start() failed")
 			}
 		}
 
 		for i := 1; i < iters+1; i++ {
-			cmd := ts.wait(starti+i, servers, term)
+			cmd := ts.wait(startI+i, servers, term)
 			if ix, ok := cmd.(int); ok == false || ix != cmds[i-1] {
 				if ix == -1 {
 					// term changed -- try again
 					details := fmt.Sprintf(
 						"term changed while waiting for %v servers to commit index %v",
-						servers, starti+i)
-					tester.AnnotateCheckerNeutral(despretry, details)
+						servers, startI+i)
+					tester.AnnotateCheckerNeutral(descriptionRetry, details)
 					continue loop
 				}
 				details := fmt.Sprintf(
 					"the command submitted at index %v in term %v is %v, but read %v",
-					starti+i, term, cmds[i-1], cmd)
+					startI+i, term, cmds[i-1], cmd)
 				tester.AnnotateCheckerFailure("incorrect command committed", details)
-				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, starti+i, cmds)
+				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, startI+i, cmds)
 			}
 		}
 
 		failed := false
 		total2 = 0
 		for j := 0; j < servers; j++ {
-			if t, _ := ts.srvs[j].Raft().GetState(); t != term {
+			if t, _ := ts.servers[j].Raft().GetState(); t != term {
 				// term changed -- can't expect low RPC counts
 				// need to keep going to update total2
 				details := fmt.Sprintf("term of server %v changed from %v to %v", j, term, t)
-				tester.AnnotateCheckerNeutral(despretry, details)
+				tester.AnnotateCheckerNeutral(descriptionRetry, details)
 				failed = true
 			}
 			total2 += ts.g.RpcCount(j)
@@ -913,7 +913,7 @@ func TestFigure83C(t *testing.T) {
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
-			rf := ts.srvs[i].Raft()
+			rf := ts.servers[i].Raft()
 			if rf != nil {
 				cmd := rand.Int()
 				_, _, ok := rf.Start(cmd)
@@ -941,7 +941,7 @@ func TestFigure83C(t *testing.T) {
 
 		if nup < 3 {
 			s := rand.Int() % servers
-			if ts.srvs[s].Raft() == nil {
+			if ts.servers[s].Raft() == nil {
 				ts.restart(s)
 				tester.AnnotateRestart([]int{s})
 				nup += 1
@@ -950,7 +950,7 @@ func TestFigure83C(t *testing.T) {
 	}
 
 	for i := 0; i < servers; i++ {
-		if ts.srvs[i].Raft() == nil {
+		if ts.servers[i].Raft() == nil {
 			ts.restart(i)
 		}
 	}
@@ -1006,7 +1006,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			cmd := rand.Int() % 10000
-			_, _, ok := ts.srvs[i].Raft().Start(cmd)
+			_, _, ok := ts.servers[i].Raft().Start(cmd)
 			if ok {
 				text := fmt.Sprintf("submitted command %v to server %v", cmd, i)
 				tester.AnnotateInfo(text, text)
@@ -1079,7 +1079,7 @@ func internalChurn(t *testing.T, reliable bool) {
 			for i := 0; i < servers; i++ {
 				// try them all, maybe one of them is a leader
 				ts.mu.Lock()
-				rf := ts.srvs[i].Raft()
+				rf := ts.servers[i].Raft()
 				ts.mu.Unlock()
 				if rf != nil {
 					index1, _, ok1 := rf.Start(x)
@@ -1130,7 +1130,7 @@ func internalChurn(t *testing.T, reliable bool) {
 
 		if (rand.Int() % 1000) < 500 {
 			i := rand.Int() % servers
-			if ts.srvs[i].raft == nil {
+			if ts.servers[i].raft == nil {
 				ts.restart(i)
 				tester.AnnotateRestart([]int{i})
 			}
@@ -1140,7 +1140,7 @@ func internalChurn(t *testing.T, reliable bool) {
 
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
-			if ts.srvs[i].raft != nil {
+			if ts.servers[i].raft != nil {
 				ts.g.ShutdownServer(i)
 				tester.AnnotateShutdown([]int{i})
 			}
@@ -1156,7 +1156,7 @@ func internalChurn(t *testing.T, reliable bool) {
 	time.Sleep(RaftElectionTimeout)
 	ts.SetReliable(true)
 	for i := 0; i < servers; i++ {
-		if ts.srvs[i].raft == nil {
+		if ts.servers[i].raft == nil {
 			ts.restart(i)
 		}
 		ts.g.ConnectOne(i)
@@ -1259,7 +1259,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		start := tester.GetAnnotateTimestamp()
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
-			ts.srvs[sender].Raft().Start(rand.Int())
+			ts.servers[sender].Raft().Start(rand.Int())
 		}
 		text := fmt.Sprintf("submitting %v commands to %v", nn, sender)
 		tester.AnnotateInfoInterval(start, text, text)
