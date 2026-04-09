@@ -1,7 +1,17 @@
 # Go Distributed Systems: MapReduce & Raft
 
-This repository contains my implementations of the labs from the [MIT 6.5840 (Spring 2025) Distributed Systems course](http://nil.csail.mit.edu/6.5840/2025/schedule.html). The project focuses on building fault-tolerant, scalable, and linearizable distributed services using Go.
+This repository contains my implementation overview of the labs from the [MIT 6.5840 (Spring 2025) Distributed Systems course](http://nil.csail.mit.edu/6.5840/2025/schedule.html). The project focuses on building fault-tolerant, scalable, and linearizable distributed services using Go.
 
+## Academic Integrity & Code Access
+
+To comply with the [MIT 6.5840 Collaboration Policy](http://nil.csail.mit.edu/6.5840/2025/general.html#collaboration), the full source code for these labs is kept in a **private repository**. 
+
+In this public repository, I have provided:
+* **Detailed Design Docs**: Explanations of how I handled concurrency, failure recovery, and linearizability.
+* **Key Implementation Snippets**: Selected portions of the Coordinator, Raft safety logic, and the RSM layer to showcase my coding style and architectural thinking.
+
+**For Recruiters and Hiring Managers:**
+I am more than happy to discuss my implementation in detail during an interview or provide private access to the full source code for review purposes upon request. Please feel free to reach out via [LinkedIn/Email].
 
 ## Lab 1: Distributed MapReduce
 A simplified version of the Google MapReduce framework. I implemented a coordinated system where a **Coordinator** manages task distribution and a pool of **Workers** executes Map and Reduce functions in parallel.
