@@ -116,6 +116,7 @@ func (rsm *RSM) notifyPending(index int, id string, val any) {
     // Clean up any other pending entries that are now outdated
     rsm.notifyOutdated(index) 
 }
+```
 
 ## Key/Value Server Implementation
 The `KVServer` maintains the actual database and implements the `DoOp` logic required by the RSM.
