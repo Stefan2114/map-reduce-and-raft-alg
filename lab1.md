@@ -4,7 +4,7 @@ This project implements a distributed MapReduce system as described in the [MIT 
 
 ---
 
-## 🏗️ Architecture & Component Design
+## Architecture & Component Design
 
 The system relies on a pull-based model where stateless Workers request tasks from a stateful Coordinator via RPC.
 
